@@ -146,14 +146,9 @@ func (t *token) Close() {
 	t.Device.Close()
 }
 
-var tokens map[string]*token
+var tokens = make(map[string]*token)
 
 func openTokens() map[string]*token {
-	// First time init
-	if tokens == nil {
-		tokens = make(map[string]*token)
-	}
-
 	// Clean up dead devices
 	for p, d := range tokens {
 		if _, err := d.Device.Ping([]byte{0x01}); err != nil {
@@ -200,13 +195,7 @@ func closeTokens() {
 func getChallenge() ([]byte, error) {
 	challenge := make([]byte, 32)
 	n, err := io.ReadFull(rand.Reader, challenge)
-	if err != nil {
-		return nil, err
-	}
-	if n != 32 {
-		return nil, errors.New("Could not read enough random data")
-	}
-	return challenge, nil
+	return challenge, err
 }
 
 func (u Client) Register(ctx context.Context) (RegisterResponse, error) {
@@ -297,6 +286,7 @@ func (u Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler)
 	}
 }
 
+// CheckAuthenticate returns a signed response if the user provides presence to a token that supplied a keyhandle
 func (u Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error) {
 	if len(keyhandlers) == 0 {
 		return AuthenticateResponse{}, errors.New("No Keyhandles supplied")

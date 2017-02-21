@@ -39,12 +39,16 @@ func (ec ECSignatureBytes) ECSignature() (ECSignature, error) {
 type FacetID [32]byte
 
 type Client struct {
-	FacetID FacetID
+	FacetID      FacetID
+	ErrorHandler func(error)
 }
 
 // NewClient will Generate a new Client from a given facet url
 func NewClient(url string) Client {
-	return Client{FacetID: sha256.Sum256([]byte(url))}
+	return Client{
+		FacetID:      sha256.Sum256([]byte(url)),
+		ErrorHandler: func(error) {},
+	}
 }
 
 type KeyHandle []byte
@@ -147,7 +151,7 @@ func (t *token) Close() {
 
 var tokens = make(map[string]*token)
 
-func openTokens() map[string]*token {
+func (c Client) openTokens() map[string]*token {
 	// Clean up dead devices
 	for p, d := range tokens {
 		if _, err := d.Device.Ping([]byte{0x01}); err != nil {
@@ -169,13 +173,13 @@ func openTokens() map[string]*token {
 		dev, err := u2fhid.Open(d)
 		if err != nil {
 			// not fatal, may be one of many tokens
-			// log.Print(err)
+			c.ErrorHandler(err)
 			continue
 		}
 		t := u2ftoken.NewToken(dev)
 		version, err := t.Version()
 		if err != nil {
-			// log.Println(err)
+			c.ErrorHandler(err)
 			dev.Close()
 		} else if version == "U2F_V2" {
 			tokens[d.Path] = &token{Token: t, Device: dev}
@@ -184,7 +188,7 @@ func openTokens() map[string]*token {
 	return tokens
 }
 
-func closeTokens() {
+func (c Client) closeTokens() {
 	for p, d := range tokens {
 		d.Close()
 		delete(tokens, p)
@@ -197,36 +201,36 @@ func getChallenge() ([]byte, error) {
 	return challenge, err
 }
 
-func (u Client) Register(ctx context.Context) (RegisterResponse, error) {
+func (c Client) Register(ctx context.Context) (RegisterResponse, error) {
 	u2fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	defer closeTokens()
+	defer c.closeTokens()
 
 	challenge, err := getChallenge()
 	if err != nil {
 		return RegisterResponse{}, err
 	}
 
-	req := u2ftoken.RegisterRequest{Challenge: challenge, Application: u.FacetID[:]}
+	req := u2ftoken.RegisterRequest{Challenge: challenge, Application: c.FacetID[:]}
 
-	c := make(chan RegisterResponse, 1)
+	r := make(chan RegisterResponse, 1)
 	for {
 		done := make(chan bool)
 		go func() {
-			openTokens()
+			c.openTokens()
 
 			for _, t := range tokens {
 				res, err := t.Register(req)
 				if err == u2ftoken.ErrPresenceRequired {
 					t.Wink()
 				} else if err != nil {
-					//log.Println(err)
+					c.ErrorHandler(err)
 				} else {
 					resp, err := parseRegisterResponse(res)
 					if err != nil {
-						//log.Println(err)
+						c.ErrorHandler(err)
 					} else {
-						c <- resp
+						r <- resp
 						break
 					}
 				}
@@ -236,7 +240,7 @@ func (u Client) Register(ctx context.Context) (RegisterResponse, error) {
 		select {
 		case <-u2fctx.Done():
 			return RegisterResponse{}, context.DeadlineExceeded
-		case res := <-c:
+		case res := <-r:
 			return res, nil
 		case <-done:
 			time.Sleep(200 * time.Millisecond)
@@ -246,57 +250,57 @@ func (u Client) Register(ctx context.Context) (RegisterResponse, error) {
 }
 
 // CheckAuthenticate returns true if any currently inserted token recognises any given keyhandle
-func (u Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error) {
+func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error) {
 	if len(keyhandlers) == 0 {
 		return false, errors.New("No Keyhandles supplied")
 	}
 
 	u2fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	defer closeTokens()
+	defer c.closeTokens()
 
 	challenge, err := getChallenge()
 	if err != nil {
 		return false, err
 	}
 
-	c := make(chan bool, 1)
+	r := make(chan bool, 1)
 	go func() {
-		openTokens()
+		c.openTokens()
 		for i := range keyhandlers {
 			req := u2ftoken.AuthenticateRequest{
 				Challenge:   challenge,
-				Application: u.FacetID[:],
+				Application: c.FacetID[:],
 				KeyHandle:   keyhandlers[i].KeyHandle(),
 			}
 			for _, t := range tokens {
 				err := t.CheckAuthenticate(req)
 				if err == u2ftoken.ErrPresenceRequired || err == nil {
-					c <- true
+					r <- true
 					return
 				}
 			}
 
 		}
-		c <- false
+		r <- false
 	}()
 	select {
 	case <-u2fctx.Done():
 		return false, context.DeadlineExceeded
-	case res := <-c:
+	case res := <-r:
 		return res, nil
 	}
 }
 
 // CheckAuthenticate returns a signed response if the user provides presence to a token that supplied a keyhandle
-func (u Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error) {
+func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error) {
 	if len(keyhandlers) == 0 {
 		return AuthenticateResponse{}, errors.New("No Keyhandles supplied")
 	}
 
 	u2fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	defer closeTokens()
+	defer c.closeTokens()
 
 	challenge, err := getChallenge()
 	if err != nil {
@@ -304,17 +308,17 @@ func (u Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 	}
 
 	deviceKeyHandles := make(map[string]map[int]int)
-	c := make(chan AuthenticateResponse, 1)
+	r := make(chan AuthenticateResponse, 1)
 	for {
 		done := make(chan struct{})
 		go func() {
 			for i := range keyhandlers {
 				req := u2ftoken.AuthenticateRequest{
 					Challenge:   challenge,
-					Application: u.FacetID[:],
+					Application: c.FacetID[:],
 					KeyHandle:   keyhandlers[i].KeyHandle(),
 				}
-				for p, t := range openTokens() {
+				for p, t := range c.openTokens() {
 					if deviceKeyHandles[p] == nil {
 						deviceKeyHandles[p] = make(map[int]int)
 					}
@@ -341,9 +345,9 @@ func (u Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 					} else if err == u2ftoken.ErrPresenceRequired {
 						t.Wink()
 					} else if err != nil {
-						//log.Println(err)
+						c.ErrorHandler(err)
 					} else {
-						c <- AuthenticateResponse{
+						r <- AuthenticateResponse{
 							AuthenticateRequest: req,
 							Counter:             res.Counter,
 							Signature:           res.Signature,
@@ -358,7 +362,7 @@ func (u Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 		select {
 		case <-u2fctx.Done():
 			return AuthenticateResponse{}, context.DeadlineExceeded
-		case res := <-c:
+		case res := <-r:
 			return res, nil
 		case <-done:
 			time.Sleep(200 * time.Millisecond)

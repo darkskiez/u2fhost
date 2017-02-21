@@ -13,7 +13,7 @@ import (
 func main() {
 	ctx := context.Background()
 	app := u2fhost.NewClient("http://foobar.com")
-
+	app.ErrorHandler = func(err error) { log.Print(err) }
 	fmt.Println("Commands: (r)egister / (a)uthenticate / (c)heck / (q)uit")
 	reader := bufio.NewReader(os.Stdin)
 
@@ -54,7 +54,7 @@ func main() {
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {
-				fmt.Printf("Authenticated Token %d\n", aresp.KeyHandleIndex)
+				fmt.Printf("Authenticated Token %d\n", aresp.KeyHandleIndex+1)
 			}
 		case 'q':
 			return

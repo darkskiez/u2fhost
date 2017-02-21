@@ -8,7 +8,6 @@ import (
 	"encoding/asn1"
 	"errors"
 	"io"
-	"log"
 	"math/big"
 	"time"
 
@@ -160,7 +159,6 @@ func openTokens() map[string]*token {
 	// Enumerate new devices
 	devices, err := u2fhid.Devices()
 	if err != nil {
-		log.Print(err)
 		return tokens
 	}
 
@@ -170,13 +168,14 @@ func openTokens() map[string]*token {
 		}
 		dev, err := u2fhid.Open(d)
 		if err != nil {
-			log.Print(err)
+			// not fatal, may be one of many tokens
+			// log.Print(err)
 			continue
 		}
 		t := u2ftoken.NewToken(dev)
 		version, err := t.Version()
 		if err != nil {
-			log.Println(err)
+			// log.Println(err)
 			dev.Close()
 		} else if version == "U2F_V2" {
 			tokens[d.Path] = &token{Token: t, Device: dev}
@@ -194,7 +193,7 @@ func closeTokens() {
 
 func getChallenge() ([]byte, error) {
 	challenge := make([]byte, 32)
-	n, err := io.ReadFull(rand.Reader, challenge)
+	_, err := io.ReadFull(rand.Reader, challenge)
 	return challenge, err
 }
 
@@ -214,16 +213,18 @@ func (u Client) Register(ctx context.Context) (RegisterResponse, error) {
 	for {
 		done := make(chan bool)
 		go func() {
-			for _, t := range openTokens() {
+			openTokens()
+
+			for _, t := range tokens {
 				res, err := t.Register(req)
 				if err == u2ftoken.ErrPresenceRequired {
 					t.Wink()
 				} else if err != nil {
-					log.Println(err)
+					//log.Println(err)
 				} else {
 					resp, err := parseRegisterResponse(res)
 					if err != nil {
-						log.Println(err)
+						//log.Println(err)
 					} else {
 						c <- resp
 						break
@@ -261,13 +262,14 @@ func (u Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler)
 
 	c := make(chan bool, 1)
 	go func() {
+		openTokens()
 		for i := range keyhandlers {
 			req := u2ftoken.AuthenticateRequest{
 				Challenge:   challenge,
 				Application: u.FacetID[:],
 				KeyHandle:   keyhandlers[i].KeyHandle(),
 			}
-			for _, t := range openTokens() {
+			for _, t := range tokens {
 				err := t.CheckAuthenticate(req)
 				if err == u2ftoken.ErrPresenceRequired || err == nil {
 					c <- true
@@ -304,7 +306,7 @@ func (u Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 	deviceKeyHandles := make(map[string]map[int]int)
 	c := make(chan AuthenticateResponse, 1)
 	for {
-		done := make(chan bool)
+		done := make(chan struct{})
 		go func() {
 			for i := range keyhandlers {
 				req := u2ftoken.AuthenticateRequest{
@@ -339,7 +341,7 @@ func (u Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 					} else if err == u2ftoken.ErrPresenceRequired {
 						t.Wink()
 					} else if err != nil {
-						log.Println(err)
+						//log.Println(err)
 					} else {
 						c <- AuthenticateResponse{
 							AuthenticateRequest: req,

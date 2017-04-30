@@ -38,6 +38,9 @@ func (ec ECSignatureBytes) ECSignature() (ECSignature, error) {
 // FacetID is aka ApplicationID
 type FacetID [32]byte
 
+// Client holds the application u2f client state
+// The ErrorHandler is to give applications visibility of transient errors
+// that may occur for logging or other purposes.
 type Client struct {
 	FacetID      FacetID
 	ErrorHandler func(error)
@@ -51,17 +54,23 @@ func NewClient(url string) Client {
 	}
 }
 
+// KeyHandle is the byte sequence returned by a u2f device on registration
+// that is required to be returned to it for authentication
 type KeyHandle []byte
 
+// KeyHandler is an interface to obtain a Keyhandle for authentication
 type KeyHandler interface {
 	KeyHandle() KeyHandle
 }
 
+// SignedKeyHandle is returned when a device is registered
 type SignedKeyHandle struct {
 	kh        KeyHandle
 	PublicKey ECPublicKey
 }
 
+// KeyHandle returns the KeyHandle part of the SignedKeyHandle to be used
+// in later authentication
 func (skh SignedKeyHandle) KeyHandle() KeyHandle {
 	return skh.kh
 }
@@ -73,10 +82,20 @@ type RegisterResponse struct {
 	KeyHandle       KeyHandle
 	AttestationCert []byte
 	Signature       ECSignatureBytes
+
+	// fields from request, required to verify
+	challenge []byte
+	facetID   FacetID
 }
 
+// SignedKeyHandle extracts the signed key handle from a RegisterResponse
 func (r RegisterResponse) SignedKeyHandle() SignedKeyHandle {
 	return SignedKeyHandle{kh: r.KeyHandle, PublicKey: r.PublicKey}
+}
+
+// Verify is a stub - in the future it will check if the RegisterResponse Signature matches
+func (r RegisterResponse) Verify() bool {
+	return true
 }
 
 // AuthenticateResponse is returned when a token succesfully responds to
@@ -88,6 +107,11 @@ type AuthenticateResponse struct {
 	KeyHandle
 	KeyHandleIndex      int
 	AuthenticateRequest u2ftoken.AuthenticateRequest
+}
+
+// Verify is a stub - in the future it will check if the Authentication matches the signature
+func (a AuthenticateResponse) Verify(s SignedKeyHandle) bool {
+	return true
 }
 
 // ecdsa der signatures are 70,71,72 bytes, try each in turn to parse a signature
@@ -109,7 +133,7 @@ func findSignatureOffset(data []byte) (int, error) {
 	return 0, errors.New("Couldnt find signature")
 }
 
-func parseRegisterResponse(data []byte) (RegisterResponse, error) {
+func parseRegisterResponse(req u2ftoken.RegisterRequest, data []byte) (RegisterResponse, error) {
 	var r RegisterResponse
 	// TODO: 68 + X509 min + signature min(32?)
 	if len(data) < 100 {
@@ -133,12 +157,16 @@ func parseRegisterResponse(data []byte) (RegisterResponse, error) {
 
 	r.AttestationCert = data[67+khlen : 67+khlen+sigoffset]
 	r.Signature = data[67+khlen+sigoffset:]
+
+	r.challenge = req.Challenge
+	copy(r.facetID[:], req.Application)
 	return r, nil
 }
 
 type token struct {
 	*u2ftoken.Token
 	Device *u2fhid.Device
+	Path   string
 }
 
 func (t *token) Wink() error {
@@ -149,25 +177,24 @@ func (t *token) Close() {
 	t.Device.Close()
 }
 
-var tokens = make(map[string]*token)
-
-func (c Client) openTokens() map[string]*token {
+func (c Client) refreshTokenMap(tokens *map[string]*token) {
 	// Clean up dead devices
-	for p, d := range tokens {
+	for p, d := range *tokens {
 		if _, err := d.Device.Ping([]byte{0x01}); err != nil {
 			d.Close()
-			delete(tokens, p)
+			delete(*tokens, p)
 		}
 	}
 
 	// Enumerate new devices
 	devices, err := u2fhid.Devices()
 	if err != nil {
-		return tokens
+		c.ErrorHandler(err)
+		return
 	}
 
 	for _, d := range devices {
-		if tokens[d.Path] != nil {
+		if (*tokens)[d.Path] != nil {
 			continue
 		}
 		dev, err := u2fhid.Open(d)
@@ -182,17 +209,29 @@ func (c Client) openTokens() map[string]*token {
 			c.ErrorHandler(err)
 			dev.Close()
 		} else if version == "U2F_V2" {
-			tokens[d.Path] = &token{Token: t, Device: dev}
+			(*tokens)[d.Path] = &token{Token: t, Device: dev, Path: d.Path}
 		}
 	}
-	return tokens
+	return
 }
 
-func (c Client) closeTokens() {
-	for p, d := range tokens {
-		d.Close()
-		delete(tokens, p)
-	}
+func (c Client) tokenGenerator(ctx context.Context) chan *token {
+	ch := make(chan *token)
+	go func() {
+		tokens := make(map[string]*token)
+		for {
+			c.refreshTokenMap(&tokens)
+			for _, t := range tokens {
+				select {
+				case <-ctx.Done():
+					close(ch)
+					return
+				case ch <- t:
+				}
+			}
+		}
+	}()
+	return ch
 }
 
 func getChallenge() ([]byte, error) {
@@ -201,10 +240,10 @@ func getChallenge() ([]byte, error) {
 	return challenge, err
 }
 
+// Register will generate a RegisterResponse if a U2F token is touched.
 func (c Client) Register(ctx context.Context) (RegisterResponse, error) {
 	u2fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	defer c.closeTokens()
 
 	challenge, err := getChallenge()
 	if err != nil {
@@ -217,16 +256,15 @@ func (c Client) Register(ctx context.Context) (RegisterResponse, error) {
 	for {
 		done := make(chan bool)
 		go func() {
-			c.openTokens()
 
-			for _, t := range tokens {
+			for t := range c.tokenGenerator(u2fctx) {
 				res, err := t.Register(req)
 				if err == u2ftoken.ErrPresenceRequired {
-					t.Wink()
+					_ = t.Wink()
 				} else if err != nil {
 					c.ErrorHandler(err)
 				} else {
-					resp, err := parseRegisterResponse(res)
+					resp, err := parseRegisterResponse(req, res)
 					if err != nil {
 						c.ErrorHandler(err)
 					} else {
@@ -252,12 +290,11 @@ func (c Client) Register(ctx context.Context) (RegisterResponse, error) {
 // CheckAuthenticate returns true if any currently inserted token recognises any given keyhandle
 func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error) {
 	if len(keyhandlers) == 0 {
-		return false, errors.New("No Keyhandles supplied")
+		return false, errors.New("No KeyHandles supplied")
 	}
 
 	u2fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	defer c.closeTokens()
 
 	challenge, err := getChallenge()
 	if err != nil {
@@ -266,14 +303,13 @@ func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler)
 
 	r := make(chan bool, 1)
 	go func() {
-		c.openTokens()
 		for i := range keyhandlers {
 			req := u2ftoken.AuthenticateRequest{
 				Challenge:   challenge,
 				Application: c.FacetID[:],
 				KeyHandle:   keyhandlers[i].KeyHandle(),
 			}
-			for _, t := range tokens {
+			for t := range c.tokenGenerator(u2fctx) {
 				err := t.CheckAuthenticate(req)
 				if err == u2ftoken.ErrPresenceRequired || err == nil {
 					r <- true
@@ -292,7 +328,7 @@ func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler)
 	}
 }
 
-// CheckAuthenticate returns a signed response if the user provides presence to a token that supplied a keyhandle
+// Authenticate returns a signed response if the user provides presence to a token that supplied a keyhandle
 func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error) {
 	if len(keyhandlers) == 0 {
 		return AuthenticateResponse{}, errors.New("No Keyhandles supplied")
@@ -300,7 +336,6 @@ func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 
 	u2fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	defer c.closeTokens()
 
 	challenge, err := getChallenge()
 	if err != nil {
@@ -312,14 +347,16 @@ func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 	for {
 		done := make(chan struct{})
 		go func() {
-			for i := range keyhandlers {
-				req := u2ftoken.AuthenticateRequest{
-					Challenge:   challenge,
-					Application: c.FacetID[:],
-					KeyHandle:   keyhandlers[i].KeyHandle(),
-				}
-				for p, t := range c.openTokens() {
+			for t := range c.tokenGenerator(u2fctx) {
+				for i := range keyhandlers {
+					req := u2ftoken.AuthenticateRequest{
+						Challenge:   challenge,
+						Application: c.FacetID[:],
+						KeyHandle:   keyhandlers[i].KeyHandle(),
+					}
+					p := t.Path
 					if deviceKeyHandles[p] == nil {
+						//log.Printf("Found token %v\n", t.Path)
 						deviceKeyHandles[p] = make(map[int]int)
 					}
 					if deviceKeyHandles[p][i] == -1 {
@@ -331,9 +368,11 @@ func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 					if deviceKeyHandles[p][i] == 0 {
 						err := t.CheckAuthenticate(req)
 						if err == u2ftoken.ErrUnknownKeyHandle {
+							//log.Printf("Bad token/kh %v %v\n", t.Path, i)
 							deviceKeyHandles[p][i] = -1
 							continue
 						} else if err == u2ftoken.ErrPresenceRequired || err == nil {
+							//log.Printf("Presence Needed token/kh %v %v\n", t.Path, i)
 							deviceKeyHandles[p][i] = 1
 						}
 					}
@@ -343,7 +382,7 @@ func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 						deviceKeyHandles[p][i] = -1
 						continue
 					} else if err == u2ftoken.ErrPresenceRequired {
-						t.Wink()
+						_ = t.Wink()
 					} else if err != nil {
 						c.ErrorHandler(err)
 					} else {

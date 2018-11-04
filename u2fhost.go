@@ -2,10 +2,15 @@
 package u2fhost
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/asn1"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math/big"
@@ -15,8 +20,17 @@ import (
 	"github.com/flynn/u2f/u2ftoken"
 )
 
-// ECPublicKey is an uncompressed ECDSA public key
-type ECPublicKey [65]byte
+// ECPublicKeyBytes is an uncompressed ECDSA public key
+type ECPublicKeyBytes [65]byte
+
+func (ecpk ECPublicKeyBytes) ECPublicKey() *ecdsa.PublicKey {
+	x, y := elliptic.Unmarshal(elliptic.P256(), ecpk[:])
+	return &ecdsa.PublicKey{
+		Curve: elliptic.P256(),
+		X:     x,
+		Y:     y,
+	}
+}
 
 // ECSignatureBytes is a DER Encoded Signature, 70-72 bytes
 type ECSignatureBytes []byte
@@ -39,8 +53,8 @@ func (ec ECSignatureBytes) ECSignature() (ECSignature, error) {
 type FacetID [32]byte
 
 type ClientInterface interface {
-	Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error)
-	CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error)
+	Authenticate(ctx context.Context, keyhandlers []SignedKeyHandler) (AuthenticateResponse, error)
+	CheckAuthenticate(ctx context.Context, keyhandlers []SignedKeyHandler) (bool, error)
 	Register(ctx context.Context) (RegisterResponse, error)
 	Facet() []byte
 }
@@ -77,8 +91,18 @@ type KeyHandler interface {
 // SignedKeyHandle is returned when a device is registered
 type SignedKeyHandle struct {
 	kh        KeyHandle
-	PublicKey ECPublicKey
+	PublicKey ECPublicKeyBytes
 }
+type SignedKeyHandler interface {
+	KeyHandler
+	ECPublicKey() *ecdsa.PublicKey
+}
+
+func (skh SignedKeyHandle) ECPublicKey() *ecdsa.PublicKey {
+	return skh.PublicKey.ECPublicKey()
+}
+
+var _ SignedKeyHandler = SignedKeyHandle{}
 
 // KeyHandle returns the KeyHandle part of the SignedKeyHandle to be used
 // in later authentication
@@ -89,7 +113,7 @@ func (skh SignedKeyHandle) KeyHandle() KeyHandle {
 // RegisterResponse contains the data from a token registration
 // it is currently not validated!
 type RegisterResponse struct {
-	PublicKey       ECPublicKey
+	PublicKey       ECPublicKeyBytes
 	KeyHandle       KeyHandle
 	AttestationCert []byte
 	Signature       ECSignatureBytes
@@ -104,9 +128,21 @@ func (r RegisterResponse) SignedKeyHandle() SignedKeyHandle {
 	return SignedKeyHandle{kh: r.KeyHandle, PublicKey: r.PublicKey}
 }
 
-// Verify is a stub - in the future it will check if the RegisterResponse Signature matches
-func (r RegisterResponse) Verify() bool {
-	return true
+// Check if the RegisterResponse Signature matches the AttestationCert
+func (r RegisterResponse) CheckSignature() error {
+	c, err := x509.ParseCertificate(r.AttestationCert)
+	if err != nil {
+		return err
+	}
+
+	b := bytes.NewBuffer(nil)
+	b.Write([]byte{0})
+	b.Write(r.facetID[:])
+	b.Write(r.challenge)
+	b.Write(r.KeyHandle)
+	b.Write(r.PublicKey[:])
+	err = c.CheckSignature(x509.ECDSAWithSHA256, b.Bytes(), r.Signature[:])
+	return err
 }
 
 // AuthenticateResponse is returned when a token succesfully responds to
@@ -120,9 +156,25 @@ type AuthenticateResponse struct {
 	AuthenticateRequest u2ftoken.AuthenticateRequest
 }
 
-// Verify is a stub - in the future it will check if the Authentication matches the signature
-func (a AuthenticateResponse) Verify(s SignedKeyHandle) bool {
-	return true
+// CheckSignature is a stub - in the future it will check if the Authentication matches the signature
+func (a AuthenticateResponse) CheckSignature(s SignedKeyHandler) error {
+	h := sha256.New()
+	h.Write(a.AuthenticateRequest.Application)
+	h.Write([]byte{0x01}) // Presence
+	binary.Write(h, binary.BigEndian, a.Counter)
+	h.Write(a.AuthenticateRequest.Challenge)
+	sig, err := a.Signature.ECSignature()
+	if err != nil {
+		return err
+	}
+	pk := s.ECPublicKey()
+	if err != nil {
+		return err
+	}
+	if !ecdsa.Verify(pk, h.Sum(nil), sig.R, sig.S) {
+		return errors.New("ecdsa signature validation failed")
+	}
+	return nil
 }
 
 // ecdsa der signatures are 70,71,72 bytes, try each in turn to parse a signature
@@ -160,7 +212,8 @@ func parseRegisterResponse(req u2ftoken.RegisterRequest, data []byte) (RegisterR
 	}
 	r.KeyHandle = data[67 : 67+khlen]
 
-	// go x509/asn1 parsing explodes on ecdsa certs, this is a horrible kludge
+	// We dont know the length of the certificate and go wont parse it with
+	// trailing data, so find the signature at the end and use that
 	sigoffset, err := findSignatureOffset(data[67+khlen:])
 	if err != nil {
 		return r, errors.New("RegisterResponse: Couldnt parse signature")
@@ -299,7 +352,7 @@ func (c Client) Register(ctx context.Context) (RegisterResponse, error) {
 }
 
 // CheckAuthenticate returns true if any currently inserted token recognises any given keyhandle
-func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error) {
+func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []SignedKeyHandler) (bool, error) {
 	if len(keyhandlers) == 0 {
 		return false, errors.New("No KeyHandles supplied")
 	}
@@ -340,7 +393,7 @@ func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler)
 }
 
 // Authenticate returns a signed response if the user provides presence to a token that supplied a keyhandle
-func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error) {
+func (c Client) Authenticate(ctx context.Context, keyhandlers []SignedKeyHandler) (AuthenticateResponse, error) {
 	if len(keyhandlers) == 0 {
 		return AuthenticateResponse{}, errors.New("No Keyhandles supplied")
 	}

@@ -17,7 +17,7 @@ func main() {
 	fmt.Println("Commands: (r)egister / (a)uthenticate / (c)heck / (q)uit")
 	reader := bufio.NewReader(os.Stdin)
 
-	khs := make([]u2fhost.KeyHandler, 0)
+	khs := make([]u2fhost.SignedKeyHandler, 0)
 
 	for {
 		char, _, err := reader.ReadRune()
@@ -44,6 +44,10 @@ func main() {
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {
+				err = resp.CheckSignature()
+				if err != nil {
+					fmt.Printf("CheckSignature Failed (ignoring): %v\n", err)
+				}
 				khs = append(khs, resp.SignedKeyHandle())
 				fmt.Printf("Added Token %v\n", len(khs))
 			}
@@ -54,6 +58,10 @@ func main() {
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {
+				err = aresp.CheckSignature(khs[aresp.KeyHandleIndex])
+				if err != nil {
+					fmt.Printf("CheckSignature Failed (ignoring): %v\n", err)
+				}
 				fmt.Printf("Authenticated Token %d\n", aresp.KeyHandleIndex+1)
 			}
 		case 'q':

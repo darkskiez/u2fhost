@@ -58,11 +58,13 @@ func main() {
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {
-				err = aresp.CheckSignature(khs[aresp.KeyHandleIndex])
-				if err != nil {
-					fmt.Printf("CheckSignature Failed (ignoring): %v\n", err)
-				}
 				fmt.Printf("Authenticated Token %d\n", aresp.KeyHandleIndex+1)
+				pk := khs[aresp.KeyHandleIndex].ECPublicKey()
+				if err = aresp.CheckSignature(pk); err != nil {
+					fmt.Printf("CheckSignature Failed: %v\n", err)
+					continue
+				}
+				fmt.Printf("Validated Token Signature\n")
 			}
 		case 'q':
 			return

@@ -121,7 +121,7 @@ func (skh SignedKeyHandle) KeyHandle() KeyHandle {
 }
 
 // RegisterResponse contains the data from a token registration
-// it is currently not validated!
+// Call CheckSignature on the response to validate
 type RegisterResponse struct {
 	PublicKey       ECPublicKeyBytes
 	KeyHandle       KeyHandle
@@ -156,7 +156,8 @@ func (r RegisterResponse) CheckSignature() error {
 }
 
 // AuthenticateResponse is returned when a token succesfully responds to
-// an authentication request. Not currently validated!
+// an authentication request.
+// Call CheckSignature on the response to validate
 type AuthenticateResponse struct {
 	Counter   uint32
 	Signature ECSignatureBytes
@@ -167,7 +168,7 @@ type AuthenticateResponse struct {
 }
 
 // CheckSignature is a stub - in the future it will check if the Authentication matches the signature
-func (a AuthenticateResponse) CheckSignature(s SignedKeyHandler) error {
+func (a AuthenticateResponse) CheckSignature(pubkey *ecdsa.PublicKey) error {
 	h := sha256.New()
 	h.Write(a.AuthenticateRequest.Application)
 	h.Write([]byte{0x01}) // Presence
@@ -177,11 +178,7 @@ func (a AuthenticateResponse) CheckSignature(s SignedKeyHandler) error {
 	if err != nil {
 		return err
 	}
-	pk := s.ECPublicKey()
-	if err != nil {
-		return err
-	}
-	if !ecdsa.Verify(pk, h.Sum(nil), sig.R, sig.S) {
+	if !ecdsa.Verify(pubkey, h.Sum(nil), sig.R, sig.S) {
 		return errors.New("ecdsa signature validation failed")
 	}
 	return nil

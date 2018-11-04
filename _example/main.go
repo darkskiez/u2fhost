@@ -17,7 +17,7 @@ func main() {
 	fmt.Println("Commands: (r)egister / (a)uthenticate / (c)heck / (q)uit")
 	reader := bufio.NewReader(os.Stdin)
 
-	khs := make([]u2fhost.SignedKeyHandler, 0)
+	khs := make(u2fhost.SignedKeyHandlers, 0)
 
 	for {
 		char, _, err := reader.ReadRune()
@@ -28,7 +28,7 @@ func main() {
 		switch char {
 		case 'c':
 			fmt.Println("Checking inserted tokens")
-			resp, err := app.CheckAuthenticate(ctx, khs)
+			resp, err := app.CheckAuthenticate(ctx, khs.KeyHandlers())
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {
@@ -54,7 +54,7 @@ func main() {
 
 		case 'a':
 			fmt.Println("Touch or Insert Token to authenticate")
-			aresp, err := app.Authenticate(ctx, khs)
+			aresp, err := app.Authenticate(ctx, khs.KeyHandlers())
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {

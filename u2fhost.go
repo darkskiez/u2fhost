@@ -53,8 +53,8 @@ func (ec ECSignatureBytes) ECSignature() (ECSignature, error) {
 type FacetID [32]byte
 
 type ClientInterface interface {
-	Authenticate(ctx context.Context, keyhandlers []SignedKeyHandler) (AuthenticateResponse, error)
-	CheckAuthenticate(ctx context.Context, keyhandlers []SignedKeyHandler) (bool, error)
+	Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error)
+	CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error)
 	Register(ctx context.Context) (RegisterResponse, error)
 	Facet() []byte
 }
@@ -96,6 +96,16 @@ type SignedKeyHandle struct {
 type SignedKeyHandler interface {
 	KeyHandler
 	ECPublicKey() *ecdsa.PublicKey
+}
+
+type SignedKeyHandlers []SignedKeyHandle
+
+func (skhs SignedKeyHandlers) KeyHandlers() []KeyHandler {
+	khs := make([]KeyHandler, len(skhs))
+	for i, v := range skhs {
+		khs[i] = v
+	}
+	return khs
 }
 
 func (skh SignedKeyHandle) ECPublicKey() *ecdsa.PublicKey {
@@ -352,7 +362,7 @@ func (c Client) Register(ctx context.Context) (RegisterResponse, error) {
 }
 
 // CheckAuthenticate returns true if any currently inserted token recognises any given keyhandle
-func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []SignedKeyHandler) (bool, error) {
+func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error) {
 	if len(keyhandlers) == 0 {
 		return false, errors.New("No KeyHandles supplied")
 	}
@@ -393,7 +403,7 @@ func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []SignedKeyHa
 }
 
 // Authenticate returns a signed response if the user provides presence to a token that supplied a keyhandle
-func (c Client) Authenticate(ctx context.Context, keyhandlers []SignedKeyHandler) (AuthenticateResponse, error) {
+func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error) {
 	if len(keyhandlers) == 0 {
 		return AuthenticateResponse{}, errors.New("No Keyhandles supplied")
 	}

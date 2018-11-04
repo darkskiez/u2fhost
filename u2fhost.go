@@ -38,12 +38,23 @@ func (ec ECSignatureBytes) ECSignature() (ECSignature, error) {
 // FacetID is aka ApplicationID
 type FacetID [32]byte
 
+type ClientInterface interface {
+	Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error)
+	CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error)
+	Register(ctx context.Context) (RegisterResponse, error)
+	Facet() []byte
+}
+
 // Client holds the application u2f client state
 // The ErrorHandler is to give applications visibility of transient errors
 // that may occur for logging or other purposes.
 type Client struct {
 	FacetID      FacetID
 	ErrorHandler func(error)
+}
+
+func (c Client) Facet() []byte {
+	return c.FacetID[:]
 }
 
 // NewClient will Generate a new Client from a given facet url
@@ -409,3 +420,5 @@ func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 	}
 
 }
+
+var _ ClientInterface = Client{}

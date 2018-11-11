@@ -248,12 +248,12 @@ func (t *token) Close() {
 	t.Device.Close()
 }
 
-func (c Client) refreshTokenMap(tokens *map[string]*token) {
+func (c Client) refreshTokenMap(tokens map[string]*token) {
 	// Clean up dead devices
-	for p, d := range *tokens {
+	for p, d := range tokens {
 		if _, err := d.Device.Ping([]byte{0x01}); err != nil {
 			d.Close()
-			delete(*tokens, p)
+			delete(tokens, p)
 		}
 	}
 
@@ -265,7 +265,7 @@ func (c Client) refreshTokenMap(tokens *map[string]*token) {
 	}
 
 	for _, d := range devices {
-		if (*tokens)[d.Path] != nil {
+		if tokens[d.Path] != nil {
 			continue
 		}
 		dev, err := u2fhid.Open(d)
@@ -280,7 +280,7 @@ func (c Client) refreshTokenMap(tokens *map[string]*token) {
 			c.ErrorHandler(err)
 			dev.Close()
 		} else if version == "U2F_V2" {
-			(*tokens)[d.Path] = &token{Token: t, Device: dev, Path: d.Path}
+			tokens[d.Path] = &token{Token: t, Device: dev, Path: d.Path}
 		}
 	}
 	return
@@ -291,7 +291,7 @@ func (c Client) tokenGenerator(ctx context.Context) chan *token {
 	go func() {
 		tokens := make(map[string]*token)
 		for {
-			c.refreshTokenMap(&tokens)
+			c.refreshTokenMap(tokens)
 			for _, t := range tokens {
 				select {
 				case <-ctx.Done():

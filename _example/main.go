@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
 	"fmt"
 	"log"
 	"os"
@@ -17,7 +18,8 @@ func main() {
 	fmt.Println("Commands: (r)egister / (a)uthenticate / (c)heck / (q)uit")
 	reader := bufio.NewReader(os.Stdin)
 
-	khs := make(u2fhost.SignedKeyHandlers, 0)
+	khs := []u2fhost.KeyHandler{}
+	pks := []*ecdsa.PublicKey{}
 
 	for {
 		char, _, err := reader.ReadRune()
@@ -28,7 +30,7 @@ func main() {
 		switch char {
 		case 'c':
 			fmt.Println("Checking inserted tokens")
-			resp, err := app.CheckAuthenticate(ctx, khs.KeyHandlers())
+			resp, err := app.CheckAuthenticate(ctx, khs)
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {
@@ -48,19 +50,19 @@ func main() {
 				if err != nil {
 					fmt.Printf("CheckSignature Failed (ignoring): %v\n", err)
 				}
-				khs = append(khs, resp.SignedKeyHandle())
+				khs = append(khs, resp.KeyHandle)
+				pks = append(pks, resp.PublicKey)
 				fmt.Printf("Added Token %v\n", len(khs))
 			}
 
 		case 'a':
 			fmt.Println("Touch or Insert Token to authenticate")
-			aresp, err := app.Authenticate(ctx, khs.KeyHandlers())
+			aresp, err := app.Authenticate(ctx, khs)
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {
 				fmt.Printf("Authenticated Token %d\n", aresp.KeyHandleIndex+1)
-				pk := khs[aresp.KeyHandleIndex].ECPublicKey()
-				if err = aresp.CheckSignature(pk); err != nil {
+				if err = aresp.CheckSignature(pks[aresp.KeyHandleIndex]); err != nil {
 					fmt.Printf("CheckSignature Failed: %v\n", err)
 					continue
 				}

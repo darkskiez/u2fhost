@@ -20,10 +20,10 @@ import (
 	"github.com/flynn/u2f/u2ftoken"
 )
 
-// ECPublicKeyBytes is an uncompressed ECDSA public key
-type ECPublicKeyBytes [65]byte
+// ecPublicKeyBytes is an uncompressed ECDSA public key
+type ecPublicKeyBytes [65]byte
 
-func (ecpk ECPublicKeyBytes) ECPublicKey() *ecdsa.PublicKey {
+func (ecpk ecPublicKeyBytes) ECPublicKey() *ecdsa.PublicKey {
 	x, y := elliptic.Unmarshal(elliptic.P256(), ecpk[:])
 	return &ecdsa.PublicKey{
 		Curve: elliptic.P256(),
@@ -88,54 +88,23 @@ type KeyHandler interface {
 	KeyHandle() KeyHandle
 }
 
-// SignedKeyHandle is returned when a device is registered
-type SignedKeyHandle struct {
-	kh        KeyHandle
-	PublicKey ECPublicKeyBytes
-}
-type SignedKeyHandler interface {
-	KeyHandler
-	ECPublicKey() *ecdsa.PublicKey
-}
-
-type SignedKeyHandlers []SignedKeyHandle
-
-func (skhs SignedKeyHandlers) KeyHandlers() []KeyHandler {
-	khs := make([]KeyHandler, len(skhs))
-	for i, v := range skhs {
-		khs[i] = v
-	}
-	return khs
-}
-
-func (skh SignedKeyHandle) ECPublicKey() *ecdsa.PublicKey {
-	return skh.PublicKey.ECPublicKey()
-}
-
-var _ SignedKeyHandler = SignedKeyHandle{}
-
-// KeyHandle returns the KeyHandle part of the SignedKeyHandle to be used
-// in later authentication
-func (skh SignedKeyHandle) KeyHandle() KeyHandle {
-	return skh.kh
+// Allow using the base type directly
+func (k KeyHandle) KeyHandle() KeyHandle {
+	return k
 }
 
 // RegisterResponse contains the data from a token registration
 // Call CheckSignature on the response to validate
 type RegisterResponse struct {
-	PublicKey       ECPublicKeyBytes
+	PublicKey       *ecdsa.PublicKey
 	KeyHandle       KeyHandle
 	AttestationCert []byte
 	Signature       ECSignatureBytes
 
 	// fields from request, required to verify
+	publicKey ecPublicKeyBytes
 	challenge []byte
 	facetID   FacetID
-}
-
-// SignedKeyHandle extracts the signed key handle from a RegisterResponse
-func (r RegisterResponse) SignedKeyHandle() SignedKeyHandle {
-	return SignedKeyHandle{kh: r.KeyHandle, PublicKey: r.PublicKey}
 }
 
 // Check if the RegisterResponse Signature matches the AttestationCert
@@ -150,7 +119,7 @@ func (r RegisterResponse) CheckSignature() error {
 	b.Write(r.facetID[:])
 	b.Write(r.challenge)
 	b.Write(r.KeyHandle)
-	b.Write(r.PublicKey[:])
+	b.Write(r.publicKey[:])
 	err = c.CheckSignature(x509.ECDSAWithSHA256, b.Bytes(), r.Signature[:])
 	return err
 }
@@ -212,7 +181,9 @@ func parseRegisterResponse(req u2ftoken.RegisterRequest, data []byte) (RegisterR
 	if data[0] != 0x05 {
 		return r, errors.New("RegisterResponse: Reserved byte != 0x05")
 	}
-	copy(r.PublicKey[:], data[1:66])
+	copy(r.publicKey[:], data[1:66])
+	r.PublicKey = r.publicKey.ECPublicKey()
+
 	khlen := int(data[66])
 	if len(data) < 67+khlen {
 		return r, errors.New("RegisterResponse: Too short for keyhandle length")

@@ -52,6 +52,7 @@ func (ec ECSignatureBytes) ECSignature() (ECSignature, error) {
 // FacetID is aka ApplicationID
 type FacetID [32]byte
 
+// ClientInterface defines this api, consume this to switch with test mocks
 type ClientInterface interface {
 	Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error)
 	CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error)
@@ -67,6 +68,7 @@ type Client struct {
 	ErrorHandler func(error)
 }
 
+// Facet returns the U2F facet url hash as bytes.
 func (c Client) Facet() []byte {
 	return c.FacetID[:]
 }
@@ -88,7 +90,7 @@ type KeyHandler interface {
 	KeyHandle() KeyHandle
 }
 
-// Allow using the base type directly
+// KeyHandle allows using the base type directly
 func (k KeyHandle) KeyHandle() KeyHandle {
 	return k
 }
@@ -107,7 +109,8 @@ type RegisterResponse struct {
 	facetID   FacetID
 }
 
-// Check if the RegisterResponse Signature matches the AttestationCert
+// CheckSignature verifies if the RegisterResponse Signature matches the AttestationCert
+// nolint:gosec
 func (r RegisterResponse) CheckSignature() error {
 	c, err := x509.ParseCertificate(r.AttestationCert)
 	if err != nil {
@@ -136,12 +139,13 @@ type AuthenticateResponse struct {
 	AuthenticateRequest u2ftoken.AuthenticateRequest
 }
 
-// CheckSignature is a stub - in the future it will check if the Authentication matches the signature
+// CheckSignature checks if the Authentication matches the signature against the provided public key
+// nolint:gosec
 func (a AuthenticateResponse) CheckSignature(pubkey *ecdsa.PublicKey) error {
 	h := sha256.New()
 	h.Write(a.AuthenticateRequest.Application)
-	h.Write([]byte{0x01}) // Presence
-	binary.Write(h, binary.BigEndian, a.Counter)
+	h.Write([]byte{0x01})                        // Presence
+	binary.Write(h, binary.BigEndian, a.Counter) // nolint:errcheck
 	h.Write(a.AuthenticateRequest.Challenge)
 	sig, err := a.Signature.ECSignature()
 	if err != nil {
@@ -254,7 +258,6 @@ func (c Client) refreshTokenMap(tokens map[string]*token) {
 			tokens[d.Path] = &token{Token: t, Device: dev, Path: d.Path}
 		}
 	}
-	return
 }
 
 func (c Client) tokenGenerator(ctx context.Context) chan *token {
@@ -302,7 +305,7 @@ func (c Client) Register(ctx context.Context) (RegisterResponse, error) {
 			for t := range c.tokenGenerator(u2fctx) {
 				res, err := t.Register(req)
 				if err == u2ftoken.ErrPresenceRequired {
-					_ = t.Wink()
+					_ = t.Wink() // nolint
 				} else if err != nil {
 					c.ErrorHandler(err)
 				} else {
@@ -424,7 +427,7 @@ func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 						deviceKeyHandles[p][i] = -1
 						continue
 					} else if err == u2ftoken.ErrPresenceRequired {
-						_ = t.Wink()
+						_ = t.Wink() // nolint
 					} else if err != nil {
 						c.ErrorHandler(err)
 					} else {

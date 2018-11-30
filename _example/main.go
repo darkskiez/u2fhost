@@ -21,6 +21,8 @@ func main() {
 	khs := []u2fhost.KeyHandler{}
 	pks := []*ecdsa.PublicKey{}
 
+	clientdata := "{If talking to a remote server put info like hostname here}"
+
 	for {
 		char, _, err := reader.ReadRune()
 		if err != nil {
@@ -30,7 +32,7 @@ func main() {
 		switch char {
 		case 'c':
 			fmt.Println("Checking inserted tokens")
-			resp, err := app.CheckAuthenticate(ctx, khs)
+			resp, err := app.CheckAuthenticate(ctx, clientdata, khs)
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {
@@ -42,7 +44,7 @@ func main() {
 			}
 		case 'r':
 			fmt.Println("Touch or Insert Token to register")
-			resp, err := app.Register(ctx)
+			resp, err := app.Register(ctx, clientdata)
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {
@@ -57,7 +59,7 @@ func main() {
 
 		case 'a':
 			fmt.Println("Touch or Insert Token to authenticate")
-			aresp, err := app.Authenticate(ctx, khs)
+			aresp, err := app.Authenticate(ctx, clientdata, khs)
 			if err != nil {
 				fmt.Printf("Err: %+v\n", err)
 			} else {

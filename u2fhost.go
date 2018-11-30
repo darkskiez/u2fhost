@@ -6,13 +6,11 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/binary"
 	"errors"
-	"io"
 	"math/big"
 	"time"
 
@@ -54,9 +52,9 @@ type FacetID [32]byte
 
 // ClientInterface defines this api, consume this to switch with test mocks
 type ClientInterface interface {
-	Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error)
-	CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error)
-	Register(ctx context.Context) (RegisterResponse, error)
+	Authenticate(ctx context.Context, clientdata string, keyhandlers []KeyHandler) (AuthenticateResponse, error)
+	CheckAuthenticate(ctx context.Context, clientdata string, keyhandlers []KeyHandler) (bool, error)
+	Register(ctx context.Context, clientdata string) (RegisterResponse, error)
 	Facet() []byte
 }
 
@@ -279,23 +277,14 @@ func (c Client) tokenGenerator(ctx context.Context) chan *token {
 	return ch
 }
 
-func getChallenge() ([]byte, error) {
-	challenge := make([]byte, 32)
-	_, err := io.ReadFull(rand.Reader, challenge)
-	return challenge, err
-}
-
 // Register will generate a RegisterResponse if a U2F token is touched.
-func (c Client) Register(ctx context.Context) (RegisterResponse, error) {
+func (c Client) Register(ctx context.Context, clientdata string) (RegisterResponse, error) {
 	u2fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	challenge, err := getChallenge()
-	if err != nil {
-		return RegisterResponse{}, err
-	}
+	challenge := sha256.Sum256([]byte(clientdata))
 
-	req := u2ftoken.RegisterRequest{Challenge: challenge, Application: c.FacetID[:]}
+	req := u2ftoken.RegisterRequest{Challenge: challenge[:], Application: c.FacetID[:]}
 
 	r := make(chan RegisterResponse, 1)
 	for {
@@ -333,7 +322,7 @@ func (c Client) Register(ctx context.Context) (RegisterResponse, error) {
 }
 
 // CheckAuthenticate returns true if any currently inserted token recognises any given keyhandle
-func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler) (bool, error) {
+func (c Client) CheckAuthenticate(ctx context.Context, clientdata string, keyhandlers []KeyHandler) (bool, error) {
 	if len(keyhandlers) == 0 {
 		return false, errors.New("No KeyHandles supplied")
 	}
@@ -341,16 +330,13 @@ func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler)
 	u2fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	challenge, err := getChallenge()
-	if err != nil {
-		return false, err
-	}
+	challenge := sha256.Sum256([]byte(clientdata))
 
 	r := make(chan bool, 1)
 	go func() {
 		for i := range keyhandlers {
 			req := u2ftoken.AuthenticateRequest{
-				Challenge:   challenge,
+				Challenge:   challenge[:],
 				Application: c.FacetID[:],
 				KeyHandle:   keyhandlers[i].KeyHandle(),
 			}
@@ -374,7 +360,7 @@ func (c Client) CheckAuthenticate(ctx context.Context, keyhandlers []KeyHandler)
 }
 
 // Authenticate returns a signed response if the user provides presence to a token that supplied a keyhandle
-func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (AuthenticateResponse, error) {
+func (c Client) Authenticate(ctx context.Context, clientdata string, keyhandlers []KeyHandler) (AuthenticateResponse, error) {
 	if len(keyhandlers) == 0 {
 		return AuthenticateResponse{}, errors.New("No Keyhandles supplied")
 	}
@@ -382,10 +368,7 @@ func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 	u2fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	challenge, err := getChallenge()
-	if err != nil {
-		return AuthenticateResponse{}, err
-	}
+	challenge := sha256.Sum256([]byte(clientdata))
 
 	deviceKeyHandles := make(map[string]map[int]int)
 	r := make(chan AuthenticateResponse, 1)
@@ -395,7 +378,7 @@ func (c Client) Authenticate(ctx context.Context, keyhandlers []KeyHandler) (Aut
 			for t := range c.tokenGenerator(u2fctx) {
 				for i := range keyhandlers {
 					req := u2ftoken.AuthenticateRequest{
-						Challenge:   challenge,
+						Challenge:   challenge[:],
 						Application: c.FacetID[:],
 						KeyHandle:   keyhandlers[i].KeyHandle(),
 					}

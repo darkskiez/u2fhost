@@ -18,6 +18,9 @@ import (
 	"github.com/flynn/u2f/u2ftoken"
 )
 
+var KeyNotFoundError = errors.New("matching key not found")
+var NoKeysInsertedError = errors.New("no security keys inserted")
+
 // ecPublicKeyBytes is an uncompressed ECDSA public key
 type ecPublicKeyBytes [65]byte
 
@@ -53,7 +56,7 @@ type FacetID [32]byte
 // ClientInterface defines this api, consume this to switch with test mocks
 type ClientInterface interface {
 	Authenticate(ctx context.Context, clientdata string, keyhandlers []KeyHandler) (AuthenticateResponse, error)
-	CheckAuthenticate(ctx context.Context, clientdata string, keyhandlers []KeyHandler) (bool, error)
+	CheckAuthenticate(ctx context.Context, clientdata string, keyhandlers []KeyHandler) (int, error)
 	Register(ctx context.Context, clientdata string) (RegisterResponse, error)
 	Facet() []byte
 }
@@ -321,10 +324,10 @@ func (c Client) Register(ctx context.Context, clientdata string) (RegisterRespon
 
 }
 
-// CheckAuthenticate returns true if any currently inserted token recognises any given keyhandle
-func (c Client) CheckAuthenticate(ctx context.Context, clientdata string, keyhandlers []KeyHandler) (bool, error) {
+// CheckAuthenticate returns the index if any currently inserted token recognises any given keyhandle or an error
+func (c Client) CheckAuthenticate(ctx context.Context, clientdata string, keyhandlers []KeyHandler) (int, error) {
 	if len(keyhandlers) == 0 {
-		return false, errors.New("No KeyHandles supplied")
+		return 0, errors.New("No KeyHandles supplied")
 	}
 
 	u2fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -332,7 +335,13 @@ func (c Client) CheckAuthenticate(ctx context.Context, clientdata string, keyhan
 
 	challenge := sha256.Sum256([]byte(clientdata))
 
-	r := make(chan bool, 1)
+	tokens := make(map[string]*token)
+	c.refreshTokenMap(tokens)
+	if len(tokens) == 0 {
+		return -2, NoKeysInsertedError
+	}
+
+	r := make(chan int, 1)
 	go func() {
 		for i := range keyhandlers {
 			req := u2ftoken.AuthenticateRequest{
@@ -340,21 +349,25 @@ func (c Client) CheckAuthenticate(ctx context.Context, clientdata string, keyhan
 				Application: c.FacetID[:],
 				KeyHandle:   keyhandlers[i].KeyHandle(),
 			}
-			for t := range c.tokenGenerator(u2fctx) {
+
+			for _, t := range tokens {
 				err := t.CheckAuthenticate(req)
 				if err == u2ftoken.ErrPresenceRequired || err == nil {
-					r <- true
+					r <- i
 					return
 				}
 			}
 
 		}
-		r <- false
+		r <- -1
 	}()
 	select {
 	case <-u2fctx.Done():
-		return false, context.DeadlineExceeded
+		return -1, context.DeadlineExceeded
 	case res := <-r:
+		if res < 0 {
+			return -1, KeyNotFoundError
+		}
 		return res, nil
 	}
 }
